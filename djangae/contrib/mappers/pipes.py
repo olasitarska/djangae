@@ -1,5 +1,4 @@
 from mapreduce.mapper_pipeline import MapperPipeline
-import cPickle
 
 
 class MapReduceTask(object):
@@ -13,7 +12,6 @@ class MapReduceTask(object):
 
     """
     shard_count = 3
-    query_def = None # Needs to be overwritten with a queryDef
     pipeline_class = MapperPipeline # Defaults to MapperPipeline which just runs map stage
     job_name = None
     queue_name = 'default'

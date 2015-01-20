@@ -26,6 +26,7 @@ from google.appengine.ext import deferred
 from google.appengine.api import taskqueue
 from django.test.utils import override_settings
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import FieldError
 
 # DJANGAE
 from djangae.contrib import sleuth
@@ -34,6 +35,7 @@ from djangae.test import inconsistent_db, TestCase
 from django.db import IntegrityError as DjangoIntegrityError
 from djangae.db.backends.appengine.dbapi import CouldBeSupportedError, NotSupportedError, IntegrityError
 from djangae.db.constraints import UniqueMarker, UniquenessMixin
+from djangae.db.unique_utils import _unique_combinations, unique_identifiers_from_entity
 from djangae.indexing import add_special_index
 from djangae.db.utils import entity_matches_query
 from djangae.db.backends.appengine import caching
@@ -88,8 +90,15 @@ class IntegerModel(models.Model):
 
 class TestFruit(models.Model):
     name = models.CharField(primary_key=True, max_length=32)
+    origin = models.CharField(max_length=32, default="Unknown")
     color = models.CharField(max_length=100)
+    is_mouldy = models.BooleanField(default=False)
 
+    def __unicode__(self):
+        return self.name
+
+    def __repr__(self):
+        return "<TestFruit: name={}, color={}>".format(self.name, self.color)
 
 class Permission(models.Model):
     user = models.ForeignKey(TestUser)
@@ -308,6 +317,36 @@ class BackendTests(TestCase):
         obj = TestFruit.objects.filter(color=grue)[0]
         self.assertEqual(type(obj.color), unicode)
 
+    def test_notsupportederror_thrown_on_too_many_inequalities(self):
+        TestFruit.objects.create(name="Apple", color="Green", origin="England")
+        pear = TestFruit.objects.create(name="Pear", color="Green")
+        banana = TestFruit.objects.create(name="Banana", color="Yellow")
+
+        # Excluding one field is fine
+        self.assertItemsEqual([pear, banana], list(TestFruit.objects.exclude(name="Apple")))
+
+        # Excluding a field, and doing a > or < on another is not so fine
+        with self.assertRaises(DataError):
+            self.assertEqual(pear, TestFruit.objects.exclude(origin="England").filter(color__lt="Yellow").get())
+
+        # Same with excluding two fields
+        with self.assertRaises(DataError):
+            list(TestFruit.objects.exclude(origin="England").exclude(color="Yellow"))
+
+        # But apparently excluding the same field twice is OK
+        self.assertItemsEqual([banana], list(TestFruit.objects.exclude(origin="England").exclude(name="Pear")))
+
+    def test_excluding_pks_is_emulated(self):
+        apple = TestFruit.objects.create(name="Apple", color="Green", is_mouldy=True, origin="England")
+        banana = TestFruit.objects.create(name="Banana", color="Yellow", is_mouldy=True, origin="Dominican Republic")
+        cherry = TestFruit.objects.create(name="Cherry", color="Red", is_mouldy=True, origin="Germany")
+        pear = TestFruit.objects.create(name="Pear", color="Green", origin="England")
+
+        self.assertEqual([apple, pear], list(TestFruit.objects.filter(origin__lt="Germany").exclude(pk=banana.pk).exclude(pk=cherry.pk).order_by("origin")))
+        self.assertEqual([apple, cherry], list(TestFruit.objects.exclude(origin="Dominican Republic").exclude(pk=pear.pk)))
+        self.assertEqual([], list(TestFruit.objects.filter(is_mouldy=True).filter(color="Green", origin__gt="England").exclude(pk=pear.pk).order_by("-origin")))
+        self.assertEqual([cherry, banana], list(TestFruit.objects.exclude(pk=pear.pk).order_by("-name")[:2]))
+        self.assertEqual([banana, apple], list(TestFruit.objects.exclude(pk=pear.pk).order_by("origin", "name")[:2]))
 
 class ModelFormsetTest(TestCase):
     def test_reproduce_index_error(self):
@@ -536,6 +575,12 @@ class QueryNormalizationTests(TestCase):
 class ModelWithUniques(models.Model):
     name = models.CharField(max_length=64, unique=True)
 
+class ModelWithUniquesOnForeignKey(models.Model):
+    name = models.CharField(max_length=64, unique=True)
+    related_name = models.ForeignKey(ModelWithUniques, unique=True)
+
+    class Meta:
+        unique_together = [("name", "related_name")]
 
 class ModelWithDates(models.Model):
     start = models.DateField()
@@ -595,6 +640,33 @@ class ConstraintTests(TestCase):
         with self.assertRaises((IntegrityError, DataError)):
             instance.name = "One"
             instance.save()
+
+    def test_unique_combinations_are_returned_correctly(self):
+        combos_one = _unique_combinations(ModelWithUniquesOnForeignKey, ignore_pk=True)
+        combos_two = _unique_combinations(ModelWithUniquesOnForeignKey, ignore_pk=False)
+
+        self.assertEqual([['name', 'related_name'], ['name'], ['related_name']], combos_one)
+        self.assertEqual([['name', 'related_name'], ['id'], ['name'], ['related_name']], combos_two)
+
+        class Entity(dict):
+            def __init__(self, model, id):
+                self._key = datastore.Key.from_path(model, id)
+
+            def key(self):
+                return self._key
+
+        e1 = Entity(ModelWithUniquesOnForeignKey._meta.db_table, 1)
+        e1["name"] = "One"
+        e1["related_name_id"] = 1
+
+        ids_one = unique_identifiers_from_entity(ModelWithUniquesOnForeignKey, e1)
+
+        self.assertItemsEqual([
+            u'djangae_modelwithuniquesonforeignkey|id:1',
+            u'djangae_modelwithuniquesonforeignkey|name:06c2cea18679d64399783748fa367bdd',
+            u'djangae_modelwithuniquesonforeignkey|related_name_id:1',
+            u'djangae_modelwithuniquesonforeignkey|name:06c2cea18679d64399783748fa367bdd|related_name_id:1'
+        ], ids_one)
 
     def test_error_on_update_doesnt_change_markers(self):
         initial_count = datastore.Query(UniqueMarker.kind()).Count()
@@ -1040,6 +1112,9 @@ class EdgeCaseTests(TestCase):
         users = TestUser.objects.all().order_by("-username")
 
         self.assertEqual(["A", "B", "C", "D", "E"][::-1], [x.username for x in users])
+
+        with self.assertRaises(FieldError):
+            users = list(TestUser.objects.order_by("bananas"))
 
     def test_dates_query(self):
         z_user = TestUser.objects.create(username="Z", email="z@example.com")

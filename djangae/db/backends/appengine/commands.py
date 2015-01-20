@@ -7,6 +7,9 @@ from itertools import chain, groupby
 
 #LIBRARIES
 from django.db import DatabaseError
+from django.core.exceptions import FieldError
+from django.db.models.fields import FieldDoesNotExist
+
 from django.core.cache import cache
 from django.db import IntegrityError
 from django.db.models.sql.datastructures import EmptyResultSet
@@ -321,7 +324,29 @@ def _convert_ordering(query):
     if result:
         # We factor out cross-table orderings (rather than raising NotSupportedError) otherwise we'll break
         # the admin which uses them. We log a warning when this happens though
-        ordering = [ x for x in result if not (isinstance(x, basestring) and "__" in x) ]
+        try:
+            ordering = []
+            for name in result:
+                if name == "?":
+                    raise NotSupportedError("Random ordering is not supported on the datastore")
+
+                if not (isinstance(name, basestring) and "__" in name):
+                    if isinstance(name, basestring):
+                        if name.lstrip("-") == "pk":
+                            field_column = query.model._meta.pk.column
+                        else:
+                            field_column = query.model._meta.get_field(name.lstrip("-")).column
+                        ordering.append(field_column if not name.startswith("-") else "-{}".format(field_column))
+                    else:
+                        ordering.append(name)
+
+        except FieldDoesNotExist:
+            opts = query.model._meta
+            available = opts.get_all_field_names()
+            raise FieldError("Cannot resolve keyword %r into field. "
+                "Choices are: %s" % (name, ", ".join(available))
+            )
+
         if len(ordering) < len(result):
             diff = set(result) - set(ordering)
             log_once(
@@ -330,8 +355,6 @@ def _convert_ordering(query):
             )
         result = ordering
 
-    if "?" in result:
-        raise NotSupportedError("Random ordering is not supported on the datastore")
 
     return result
 
@@ -342,6 +365,7 @@ class SelectCommand(object):
         self.connection = connection
 
         self.limits = (query.low_mark, query.high_mark)
+        self.results_returned = 0
 
         opts = query.get_meta()
 
@@ -463,7 +487,7 @@ class SelectCommand(object):
                 raise NotSupportedError("Cross-join WHERE constraints aren't supported: %s" % query.where.get_cols())
 
             from dnf import parse_dnf
-            self.where, columns = parse_dnf(query.where, self.connection)
+            self.where, columns, self.excluded_pks = parse_dnf(query.where, self.connection, ordering=query.order_by)
 
         # DISABLE PROJECTION IF WE ARE FILTERING ON ONE OF THE PROJECTION_FIELDS
         for field in self.projection or []:
@@ -640,6 +664,7 @@ class SelectCommand(object):
                     for query in queries:
                         qry = Query(query._Query__kind, projection=query._Query__query_options.projection)
                         qry.update(query)
+                        qry.Order(*ordering)
                         new_queries.append(qry)
 
                     query = datastore.MultiQuery(new_queries, ordering)
@@ -662,11 +687,27 @@ class SelectCommand(object):
     def _do_fetch(self):
         assert not self.results
 
+        # If we're manually excluding PKs, and we've specified a limit to the results
+        # we need to make sure that we grab more than we were asked for otherwise we could filter
+        # out too many! These are again limited back to the original requeste limite
+        # while we're processing the results later
+        excluded_pk_count = 0
+        if self.excluded_pks and self.limits[1]:
+            excluded_pk_count = len(self.excluded_pks)
+            self.limits = tuple([self.limits[0], self.limits[1] + excluded_pk_count])
+
         self.results = self._run_query(
             aggregate_type=self.aggregate_type,
             start=self.limits[0],
             limit=None if self.limits[1] is None else (self.limits[1] - (self.limits[0] or 0))
         )
+
+        # Ensure that the results returned is reset
+        self.results_returned = 0
+
+        if excluded_pk_count:
+            # Reset the upper limit if we adjusted it above
+            self.limits = tuple([self.limits[0], self.limits[1] - excluded_pk_count])
 
         self.query_done = True
 
@@ -741,6 +782,10 @@ class SelectCommand(object):
         return results
 
     def next_result(self):
+        if self.limits[1]:
+            if self.results_returned >= self.limits[1] - (self.limits[0] or 0):
+                raise StopIteration()
+
         while True:
             x = self.results.next()
 
@@ -763,6 +808,8 @@ class SelectCommand(object):
                     # the correct value for this field. The alternative would be to call
                     # self.distinct_field_convertor again in Cursor.fetchone, but that's wasteful.
                     x[self.distinct_on_field] = value
+
+            self.results_returned += 1
             return x
 
 class FlushCommand(object):

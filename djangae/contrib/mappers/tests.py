@@ -1,9 +1,6 @@
-import logging
-
-from django.test import TestCase, RequestFactory
+from django.test import TestCase
 from django.db import models
 
-from djangae.contrib.mappers.queryset import QueryDef
 from djangae.test import process_task_queues
 from djangae.contrib.mappers.pipes import MapReduceTask
 

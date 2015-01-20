@@ -32,8 +32,7 @@ def unique_identifiers_from_entity(model, entity, ignore_pk=False, ignore_null_v
 
     identifiers = []
     for combination in unique_combinations:
-        combo_identifiers = []
-        identifier = []
+        combo_identifiers = [[]]
 
         include_combination = True
 
@@ -47,19 +46,25 @@ def unique_identifiers_from_entity(model, entity, ignore_pk=False, ignore_null_v
 
             # If ignore_null_values is True, then we don't include combinations where the value is None
             # or if the field is a multivalue field where None means no value (you can't store None in a list)
-            if value is None and (ignore_null_values or isinstance(value, (list, set))):
+            if (value is None and ignore_null_values) or (not value and isinstance(value, (list, set))):
                 include_combination = False
+                break
 
-            if isinstance(value, (list, set)):
+            if not isinstance(value, (list, set)):
+                value = [value]
+
+            new_combo_identifers = []
+
+            for existing in combo_identifiers:
                 for v in value:
-                    combo_identifiers.append(identifier + ["{}:{}".format(field_name, _format_value_for_identifier(v))])
-            else:
-                identifier.append("{}:{}".format(field_name, _format_value_for_identifier(value)))
-                combo_identifiers.append(identifier)
+                    identifier = "{}:{}".format(field.column, _format_value_for_identifier(v))
+                    new_combo_identifers.append(existing + [identifier])
+
+            combo_identifiers = new_combo_identifers
 
         if include_combination:
-            for identifier in combo_identifiers:
-                identifiers.append(model._meta.db_table + "|" + "|".join(identifier))
+            for ident in combo_identifiers:
+                identifiers.append(model._meta.db_table + "|" + "|".join(ident))
 
     return identifiers
 
