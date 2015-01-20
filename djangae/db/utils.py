@@ -141,24 +141,24 @@ def django_instance_to_entity(connection, model, fields, raw, instance):
         else:
             field_values[field.column] = value
 
-        # Add special indexed fields
-        for index in special_indexes_for_column(model, field.column):
-            indexer = REQUIRES_SPECIAL_INDEXES[index]
-            values = indexer.prep_value_for_database(value)
-            indexes_ready = False
+        if value:
+            # Add special indexed fields
+            for index in special_indexes_for_column(model, field.column):
+                indexer = REQUIRES_SPECIAL_INDEXES[index]
+                values = indexer.prep_value_for_database(value)
+                indexes_ready = False
 
-            if values:
-                if type(values) == list:
-                    if type(values[0]) == list:
-                        i = 0
-                        indexes_ready = True
-                        for v in values:
-                            field_values[indexer.indexed_column_name(field.column, number=i)] = v
-                            i += 1
-                            
-            if not indexes_ready:
-                field_values[indexer.indexed_column_name(field.column, value=value)] = values
+                if values:
+                    if type(values) == list:
+                        if type(values[0]) == list:
+                            i = 0
+                            indexes_ready = True
+                            for v in values:
+                                field_values[indexer.indexed_column_name(field.column, number=i)] = v
+                                i += 1
 
+                if not indexes_ready:
+                    field_values[indexer.indexed_column_name(field.column, value=value)] = values
 
     kwargs = {}
     if primary_key:

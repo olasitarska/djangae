@@ -989,24 +989,25 @@ class UpdateCommand(object):
         instance = MockInstance(**instance_kwargs)
         for field, param, value in self.values:
             result[field.column] = get_prepared_db_value(self.connection, instance, field, raw=True)
-            # Add special indexed fields
-            for index in special_indexes_for_column(self.model, field.column):
-                indexer = REQUIRES_SPECIAL_INDEXES[index]
-                values = indexer.prep_value_for_database(value)
-                indexes_ready = False
+            if value:
+                # Add special indexed fields
+                for index in special_indexes_for_column(self.model, field.column):
+                    indexer = REQUIRES_SPECIAL_INDEXES[index]
+                    values = indexer.prep_value_for_database(value)
+                    indexes_ready = False
 
-                if values:
-                    if type(values) == list:
-                        if type(values[0]) == list:
-                            # Here add field for each column of an index (icontains, contains)
-                            i = 0
-                            indexes_ready = True
-                            for v in values:
-                                result[indexer.indexed_column_name(field.column, number=i)] = v
-                                i += 1
+                    if values:
+                        if type(values) == list:
+                            if type(values[0]) == list:
+                                # Here add field for each column of an index (icontains, contains)
+                                i = 0
+                                indexes_ready = True
+                                for v in values:
+                                    result[indexer.indexed_column_name(field.column, number=i)] = v
+                                    i += 1
 
-                if not indexes_ready:
-                    result[indexer.indexed_column_name(field.column)] = values
+                    if not indexes_ready:
+                        result[indexer.indexed_column_name(field.column)] = values
 
         if not constraints.constraint_checks_enabled(self.model):
             # The fast path, no constraint checking

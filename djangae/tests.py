@@ -91,7 +91,7 @@ class IntegerModel(models.Model):
 class TestFruit(models.Model):
     name = models.CharField(primary_key=True, max_length=32)
     origin = models.CharField(max_length=32, default="Unknown")
-    color = models.CharField(max_length=100)
+    color = models.CharField(max_length=100, null=True)
     is_mouldy = models.BooleanField(default=False)
 
     def __unicode__(self):
@@ -1202,6 +1202,13 @@ class EdgeCaseTests(TestCase):
         self.assertEqual(len(list(qry)), 1)
         qry = TestFruit.objects.filter(color__icontains='8901')
         self.assertEqual(len(list(qry)), 0)
+
+    def test_special_indexes_for_null_values(self):
+        obj = TestFruit.objects.create(name='pear', color=None)
+        indexes = ['icontains', 'contains', 'iexact', 'iendswith', 'endswith', 'istartswith', 'startswith']
+        for index in indexes:
+            add_special_index(TestFruit, 'color', index)
+        obj.save()
 
 
 
